@@ -6,3 +6,4 @@ YOU HAVE TO INSTALL DOCKER AND ADD YOUR USER TO THE DOCKER GROUP
 ![Katharsis when starting a lab](https://i.imgur.com/4uEHyHW.png)
 ![Katharsis when connecting to a device](https://i.imgur.com/9eX8goW.png)
 ![Katharsis opening multiple windows side by side](https://i.imgur.com/l9QLIEV.png)
+![Katharsis network graph](data/screenshots/graph.png)
