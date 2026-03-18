@@ -1,7 +1,11 @@
+from typing import Optional
+
+
 class Container:
-    def __init__(self, name: str, lab_hash: str):
+    def __init__(self, name: str, lab_hash: str, networks: Optional[list[str]] = None):
         self.name = name
         self.lab_hash = lab_hash
+        self.networks = networks if networks else []
 
     def __hash__(self):
         return hash((self.name, self.lab_hash))

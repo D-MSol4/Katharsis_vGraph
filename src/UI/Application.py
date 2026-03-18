@@ -1,4 +1,5 @@
 from Kathara.manager.Kathara import Kathara
+import docker as docker_lib
 from gi.repository import Adw, Gtk, Gio
 
 from Data.Container import Container
@@ -21,6 +22,7 @@ class Application(Adw.Application):
         self.set_accels_for_action('win.paste', ['<Ctrl><Shift>v'])
 
         self.terminal_manager: TerminalManager = TerminalManager()
+        self._docker_client = None
 
         self.dialog = Gtk.FileDialog()
         self.dialog.set_title("Select a lab directory")
@@ -35,6 +37,11 @@ class Application(Adw.Application):
 
         Broker.subscribe(ContainerFocused, self.on_container_focused)
         Broker.subscribe(ContainerAttach, self.on_container_attach)
+
+    def _get_docker_client(self):
+        if self._docker_client is None:
+            self._docker_client = docker_lib.from_env()
+        return self._docker_client
 
     def on_container_attach(self, event: ContainerAttach):
         term = self.terminal_manager.get_terminal(event.container)
@@ -74,13 +81,39 @@ class Application(Adw.Application):
 
     def on_reload_begin(self, event):
         containers = Kathara.get_instance().get_machines_api_objects()
-        containers = [Container(c.labels['name'], c.labels['lab_hash']) for c in containers if c.status == 'running']
-        Broker.notify(ContainersUpdate(containers))
+        result = []
+        for c in containers:
+            if c.status != 'running':
+                continue
+            # Extract collision domain names from the container's connected networks
+            network_names = []
+            try:
+                networks_dict = c.attrs.get("NetworkSettings", {}).get("Networks", {})
+                for net_key in networks_dict:
+                    # Skip Docker default bridge network
+                    if net_key == "bridge" or net_key == "none":
+                        continue
+                    # Try to get the clean name from the Docker network labels
+                    try:
+                        docker_net = self._get_docker_client().networks.get(net_key)
+                        clean_name = docker_net.attrs.get("Labels", {}).get("name", net_key)
+                        network_names.append(clean_name)
+                    except Exception:
+                        network_names.append(net_key)
+            except Exception:
+                pass
+            result.append(Container(c.labels['name'], c.labels['lab_hash'], network_names))
+        Broker.notify(ContainersUpdate(result))
 
     def on_container_detach(self, event: ContainerDetach):
         term = self.terminal_manager.get_terminal(event.container)
-        if p := term.get_parent():
-            p.set_content(None)
+        p = term.get_parent()
+        if p is not None:
+            # The parent may be a Gtk.Box (terminal_box) or a ToolbarView
+            if hasattr(p, 'remove'):
+                p.remove(term)
+            elif hasattr(p, 'set_content'):
+                p.set_content(None)
         window = TerminalWindow(term, container=event.container)
         self.add_window(window)
         window.present()

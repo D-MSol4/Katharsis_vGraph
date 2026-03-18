@@ -20,9 +20,16 @@ class ContainerList(Gtk.ScrolledWindow):
             title="No running devices",
             description="Start a lab or reload to see your devices",
         )
-        self.rows = Adw.PreferencesGroup()
+        # Main vertical box that holds all collision domain groups
+        self.groups_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         self.set_child(self.status_page)
-        self.container_rows: dict[Container, ContainerRow] = {}
+
+        # Maps: collision_domain_name -> Adw.PreferencesGroup
+        self.domain_groups: dict[str, Adw.PreferencesGroup] = {}
+        # Maps: collision_domain_name -> number of rows in the group
+        self.domain_row_counts: dict[str, int] = {}
+        # Maps: Container -> list of (domain_name, ContainerRow) tuples
+        self.container_rows: dict[Container, list[tuple[str, ContainerRow]]] = {}
         self.containers: set[Container] = set()
 
         Broker.subscribe(ContainersUpdate, self.on_containers_update)
@@ -31,24 +38,67 @@ class ContainerList(Gtk.ScrolledWindow):
         Broker.subscribe(ContainerAdded, self.on_container_attach)
 
     def disable_entries(self, _):
-        for row in self.container_rows.values():
-            row.set_sensitive(False)
+        for entries in self.container_rows.values():
+            for _, row in entries:
+                row.set_sensitive(False)
 
     def on_container_attach(self, event: ContainerAdded):
-        self.container_rows[event.container].on_attach()
+        if event.container in self.container_rows:
+            for _, row in self.container_rows[event.container]:
+                row.on_attach()
 
     def enable_entries(self, _):
-        for row in self.container_rows.values():
-            row.set_sensitive(True)
+        for entries in self.container_rows.values():
+            for _, row in entries:
+                row.set_sensitive(True)
+
+    def _get_or_create_group(self, domain_name: str) -> Adw.PreferencesGroup:
+        """Get or create an Adw.PreferencesGroup for a collision domain."""
+        if domain_name not in self.domain_groups:
+            group = Adw.PreferencesGroup(
+                title=f" {domain_name} ",
+            )
+            self.domain_groups[domain_name] = group
+            self.domain_row_counts[domain_name] = 0
+            # Insert in alphabetical order: remove all, re-append sorted
+            for existing_name in sorted(self.domain_groups.keys()):
+                existing_group = self.domain_groups[existing_name]
+                if existing_group.get_parent() is self.groups_box:
+                    self.groups_box.remove(existing_group)
+            for sorted_name in sorted(self.domain_groups.keys()):
+                self.groups_box.append(self.domain_groups[sorted_name])
+        return self.domain_groups[domain_name]
+
+    def _remove_group_if_empty(self, domain_name: str):
+        """Remove a group if it no longer contains any rows."""
+        if self.domain_row_counts.get(domain_name, 0) <= 0:
+            group = self.domain_groups.pop(domain_name, None)
+            self.domain_row_counts.pop(domain_name, None)
+            if group is not None:
+                self.groups_box.remove(group)
 
     def build_row(self, container: Container):
         row = ContainerRow(container)
         return row
 
     def add_container(self, container: Container):
-        row = self.build_row(container)
-        self.container_rows[container] = row
-        self.rows.add(row)
+        entries = []
+        if container.networks:
+            for net_name in container.networks:
+                group = self._get_or_create_group(net_name)
+                row = self.build_row(container)
+                group.add(row)
+                self.domain_row_counts[net_name] += 1
+                entries.append((net_name, row))
+        else:
+            # Container without any collision domain
+            domain = "Not connected"
+            group = self._get_or_create_group(domain)
+            row = self.build_row(container)
+            group.add(row)
+            self.domain_row_counts[domain] += 1
+            entries.append((domain, row))
+        self.container_rows[container] = entries
 
     def on_containers_update(self, event: ContainersUpdate):
         new_containers = set(event.containers)
@@ -62,8 +112,12 @@ class ContainerList(Gtk.ScrolledWindow):
         if len(self.containers) == 0:
             self.set_child(self.status_page)
         else:
-            self.set_child(self.rows)
+            self.set_child(self.groups_box)
 
     def remove_container(self, container: Container):
-        row = self.container_rows.pop(container)
-        self.rows.remove(row)
+        entries = self.container_rows.pop(container, [])
+        for domain_name, row in entries:
+            if domain_name in self.domain_groups:
+                self.domain_groups[domain_name].remove(row)
+                self.domain_row_counts[domain_name] -= 1
+                self._remove_group_if_empty(domain_name)
