@@ -59,13 +59,15 @@ class ContainerConnect(ContainerEvent):
 
 
 class ContainerDetach(ContainerEvent):
-    def __init__(self, container: Data.Container.Container):
+    def __init__(self, container, terminal=None):
         self.container = container
+        self.terminal = terminal  # the specific terminal widget to detach
 
 
 class ContainerAttach(ContainerEvent):
-    def __init__(self, container: Data.Container.Container):
+    def __init__(self, container, terminal=None):
         self.container = container
+        self.terminal = terminal
 
 
 class TerminalAttach(ContainerAdded):
@@ -85,8 +87,10 @@ class TerminalPasteEvent(TerminalEvent): pass
 
 
 class SetTerminal(TerminalEvent):
-    def __init__(self, terminal):
+    def __init__(self, terminal, label: str = "Terminal", container=None):
         self.terminal = terminal
+        self.label = label
+        self.container = container
 
 
 class LabStartBegin(LabEvent): pass

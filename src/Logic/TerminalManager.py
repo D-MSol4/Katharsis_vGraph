@@ -42,9 +42,18 @@ Kathara.get_instance().connect_tty(machine_name='{container.name}', lab_hash='{c
         self.container_terminals[container] = terminal
         return terminal
 
+    def new_terminal(self, container: Container) -> Terminal:
+        """Always create a new independent terminal session for a container."""
+        terminal = Terminal()
+        terminal.run([
+            "python",
+            "-c",
+            self.connect_script.format(container=container)
+        ])
+        terminal.connect("child_exited", self.on_terminal_exited, container)
+        # Don't store in container_terminals dict — each is independent
+        return terminal
+
     def on_terminal_exited(self, term: Terminal, status: int, container: Container):
+        self.container_terminals.pop(container, None)
         Broker.notify(ContainerDisconnected(container))
-        term = self.container_terminals.pop(container)
-        if p := term.get_parent():
-            p.set_content(None)
-            term.unparent()

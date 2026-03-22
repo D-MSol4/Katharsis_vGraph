@@ -44,15 +44,21 @@ class Application(Adw.Application):
         return self._docker_client
 
     def on_container_attach(self, event: ContainerAttach):
+        if event.terminal is not None:
+            # Emitted by TerminalWindow during close process; no need to close anything
+            return
         term = self.terminal_manager.get_terminal(event.container)
-        term.get_root().close()
+        if term is not None:
+            root = term.get_root()
+            if hasattr(root, "close") and type(root).__name__ == "TerminalWindow":
+                root.close()
 
     def on_container_focused(self, e: ContainerFocused):
         self.terminal_manager.get_terminal(e.container).get_root().present()
 
     def on_open_terminal(self, _):
         term = self.terminal_manager.shell()
-        Broker.notify(SetTerminal(term))
+        Broker.notify(SetTerminal(term, label="Shell"))
 
     def select_lab(self, _):
         self.dialog.select_folder(callback=self.on_lab_start)
@@ -65,15 +71,13 @@ class Application(Adw.Application):
         term = self.terminal_manager.empty()
         term.connect("child_exited", lambda t, s: Broker.notify(ReloadBegin()) or Broker.notify(LabStartFinish()))
         term.run(["python", "-m", "kathara", "lrestart", "--noterminals", "-d", lab])
-        Broker.notify(SetTerminal(term))
+        Broker.notify(SetTerminal(term, label="Starting lab…"))
 
     def on_wipe(self, _):
         term = self.terminal_manager.empty()
         term.connect("child_exited", lambda t, s: Broker.notify(ReloadBegin()) or Broker.notify(WipeFinish()))
-        term.run([
-            "python", "-m", "kathara", "wipe",
-        ])
-        Broker.notify(SetTerminal(term))
+        term.run(["python", "-m", "kathara", "wipe"])
+        Broker.notify(SetTerminal(term, label="Wiping lab…"))
 
     def on_activate(self, _):
         MainWindow(application=self).present()
@@ -106,18 +110,16 @@ class Application(Adw.Application):
         Broker.notify(ContainersUpdate(result))
 
     def on_container_detach(self, event: ContainerDetach):
-        term = self.terminal_manager.get_terminal(event.container)
-        p = term.get_parent()
-        if p is not None:
-            # The parent may be a Gtk.Box (terminal_box) or a ToolbarView
-            if hasattr(p, 'remove'):
-                p.remove(term)
-            elif hasattr(p, 'set_content'):
-                p.set_content(None)
+        # Use the preserved terminal from the event if provided,
+        # otherwise create a fresh one (e.g. sidebar detach)
+        term = event.terminal if event.terminal is not None else self.terminal_manager.new_terminal(event.container)
+        if term.get_parent() is not None:
+            term.unparent()
         window = TerminalWindow(term, container=event.container)
         self.add_window(window)
         window.present()
 
+
     def on_container_connect(self, event: ContainerConnect):
-        event = SetTerminal(self.terminal_manager.get_terminal(event.container))
-        Broker.notify(event)
+        term = self.terminal_manager.new_terminal(event.container)
+        Broker.notify(SetTerminal(term, label=event.container.name, container=event.container))
