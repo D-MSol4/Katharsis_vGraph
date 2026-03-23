@@ -84,12 +84,14 @@ class ContainerList(Gtk.ScrolledWindow):
     def add_container(self, container: Container):
         entries = []
         if container.networks:
-            for net_name in container.networks:
-                group = self._get_or_create_group(net_name)
-                row = self.build_row(container)
-                group.add(row)
-                self.domain_row_counts[net_name] += 1
-                entries.append((net_name, row))
+            for net_name in sorted(container.networks):
+                # Show group if domain has >1 device, or if it's the device's ONLY domain
+                if self.domain_counts.get(net_name, 0) > 1 or len(container.networks) == 1:
+                    group = self._get_or_create_group(net_name)
+                    row = self.build_row(container)
+                    group.add(row)
+                    self.domain_row_counts[net_name] += 1
+                    entries.append((net_name, row))
         else:
             # Container without any collision domain
             domain = "Not connected"
@@ -101,18 +103,30 @@ class ContainerList(Gtk.ScrolledWindow):
         self.container_rows[container] = entries
 
     def on_containers_update(self, event: ContainersUpdate):
-        new_containers = set(event.containers)
-        added = new_containers - self.containers
-        removed = self.containers - new_containers
-        self.containers = new_containers
-        for container in added:
-            self.add_container(container)
-        for container in removed:
-            self.remove_container(container)
-        if len(self.containers) == 0:
+        self.containers = set(event.containers)
+        
+        # Clear existing ui
+        while child := self.groups_box.get_first_child():
+            self.groups_box.remove(child)
+        self.domain_groups.clear()
+        self.domain_row_counts.clear()
+        self.container_rows.clear()
+        
+        if not self.containers:
             self.set_child(self.status_page)
-        else:
-            self.set_child(self.groups_box)
+            return
+
+        self.set_child(self.groups_box)
+
+        # Pre-calculate domain counts
+        import collections
+        self.domain_counts = collections.Counter()
+        for c in self.containers:
+            self.domain_counts.update(c.networks if c.networks else ["Not connected"])
+                
+        # Fill completely
+        for container in sorted(self.containers, key=lambda c: c.name):
+            self.add_container(container)
 
     def remove_container(self, container: Container):
         entries = self.container_rows.pop(container, [])

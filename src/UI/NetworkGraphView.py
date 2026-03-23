@@ -25,13 +25,15 @@ def _force_directed_layout(containers, width, height, iterations=120):
         edges: list of (dev_x, dev_y, dom_x, dom_y, domain_name)
     """
     # --- Build the node list ---
-    # Collect domains
-    all_domains: set[str] = set()
+    # Collect domains and count devices per domain
+    import collections
+    domain_counts = collections.Counter()
     for c in containers:
         nets = c.networks if c.networks else ["Not connected"]
-        all_domains.update(nets)
+        domain_counts.update(nets)
 
-    all_domains_list = sorted(all_domains)
+    # Only include domains that have 2 or more devices connected
+    all_domains_list = sorted([d for d, count in domain_counts.items() if count >= 2])
     n_devices = len(containers)
     n_domains = len(all_domains_list)
     total = n_devices + n_domains
@@ -48,7 +50,22 @@ def _force_directed_layout(containers, width, height, iterations=120):
     for ci, c in enumerate(sorted_containers):
         nets = c.networks if c.networks else ["Not connected"]
         for net in nets:
-            edge_pairs.append((ci, domain_index[net]))
+            if net in domain_index:
+                edge_pairs.append((ci, domain_index[net]))
+
+    # Precompute connections for degree-2 domains
+    degree2_domains = {}
+    for d_name, d_idx in domain_index.items():
+        if domain_counts[d_name] == 2:
+            connected = [ci for (ci, dj) in edge_pairs if dj == d_idx]
+            if len(connected) == 2:
+                degree2_domains[d_idx] = (connected[0], connected[1])
+
+    # Precompute neighbors for star repulsion
+    neighbors = [[] for _ in range(total)]
+    for i, j in edge_pairs:
+        neighbors[i].append(j)
+        neighbors[j].append(i)
 
     # --- Initialise positions ---
     margin = 80
@@ -89,6 +106,7 @@ def _force_directed_layout(containers, width, height, iterations=120):
                     dist2 = 0.01
                     dx = rng.uniform(-0.1, 0.1)
                     dy = rng.uniform(-0.1, 0.1)
+                
                 force = k2 / dist2  # repulsive magnitude (actually k²/d)
                 dist = math.sqrt(dist2)
                 fx = dx / dist * force
@@ -113,6 +131,31 @@ def _force_directed_layout(containers, width, height, iterations=120):
             disp_x[j] += fx
             disp_y[j] += fy
 
+        # Star repulsion (neighbors of the same node repel each other to distribute edges evenly)
+        for i in range(total):
+            nbrs = neighbors[i]
+            if len(nbrs) > 1:
+                for idx1 in range(len(nbrs)):
+                    for idx2 in range(idx1 + 1, len(nbrs)):
+                        n1 = nbrs[idx1]
+                        n2 = nbrs[idx2]
+                        dx = pos_x[n1] - pos_x[n2]
+                        dy = pos_y[n1] - pos_y[n2]
+                        dist2 = dx * dx + dy * dy
+                        if dist2 < 0.01:
+                            dist2 = 0.01
+                            dx = rng.uniform(-0.1, 0.1)
+                            dy = rng.uniform(-0.1, 0.1)
+                        # Extra strong repulsion between siblings to maximize angle
+                        force = (k2 * 3.0) / dist2
+                        dist = math.sqrt(dist2)
+                        fx = dx / dist * force
+                        fy = dy / dist * force
+                        disp_x[n1] += fx
+                        disp_y[n1] += fy
+                        disp_x[n2] -= fx
+                        disp_y[n2] -= fy
+
         # Apply displacements (clamped by temperature)
         for i in range(total):
             disp_len = math.sqrt(disp_x[i] ** 2 + disp_y[i] ** 2)
@@ -125,7 +168,66 @@ def _force_directed_layout(containers, width, height, iterations=120):
             pos_x[i] = max(margin, min(width - margin, pos_x[i]))
             pos_y[i] = max(margin, min(height - margin, pos_y[i]))
 
+        # Enforce collinearity for degree-2 domains (180 degree angle)
+        for d_idx, (c1, c2) in degree2_domains.items():
+            pos_x[d_idx] = (pos_x[c1] + pos_x[c2]) / 2.0
+            pos_y[d_idx] = (pos_y[c1] + pos_y[c2]) / 2.0
+
         temp -= cool
+
+    # --- Post-processing: Remove overlaps ---
+    clearances = [45.0] * n_devices + [35.0] * n_domains
+    for _ in range(50):
+        moved = False
+        for i in range(total):
+            for j in range(i + 1, total):
+                dx = pos_x[i] - pos_x[j]
+                dy = pos_y[i] - pos_y[j]
+                dist2 = dx * dx + dy * dy
+                min_dist = clearances[i] + clearances[j]
+                if dist2 < min_dist * min_dist:
+                    dist = math.sqrt(dist2)
+                    if dist < 0.01:
+                        dist = 0.01
+                        dx = rng.uniform(-0.1, 0.1)
+                        dy = rng.uniform(-0.1, 0.1)
+                    
+                    overlap = min_dist - dist
+                    push = overlap * 0.7
+                    fx = (dx / dist) * push
+                    fy = (dy / dist) * push
+                    
+                    pos_x[i] += fx
+                    pos_y[i] += fy
+                    pos_x[j] -= fx
+                    pos_y[j] -= fy
+                    moved = True
+                    
+        # Re-enforce collinearity, allowing them to slide along the line to avoid overlaps
+        for d_idx, (c1, c2) in degree2_domains.items():
+            ax, ay = pos_x[c1], pos_y[c1]
+            bx, by = pos_x[c2], pos_y[c2]
+            vx, vy = bx - ax, by - ay
+            l2 = vx * vx + vy * vy
+            
+            if l2 > 0.001:
+                dx, dy = pos_x[d_idx], pos_y[d_idx]
+                t = ((dx - ax) * vx + (dy - ay) * vy) / l2
+                l = math.sqrt(l2)
+                margin_t = min(0.45, 45.0 / l)
+                t = max(margin_t, min(1.0 - margin_t, t))
+                pos_x[d_idx] = ax + t * vx
+                pos_y[d_idx] = ay + t * vy
+            else:
+                pos_x[d_idx] = ax
+                pos_y[d_idx] = ay
+            
+        for i in range(total):
+            pos_x[i] = max(margin, min(width - margin, pos_x[i]))
+            pos_y[i] = max(margin, min(height - margin, pos_y[i]))
+            
+        if not moved:
+            break
 
     # --- Build results ---
     device_nodes = []
@@ -140,8 +242,9 @@ def _force_directed_layout(containers, width, height, iterations=120):
     for c, dx, dy in device_nodes:
         nets = c.networks if c.networks else ["Not connected"]
         for net in nets:
-            dom_x, dom_y = domain_nodes[net]
-            edges.append((dx, dy, dom_x, dom_y, net))
+            if net in domain_nodes:
+                dom_x, dom_y = domain_nodes[net]
+                edges.append((dx, dy, dom_x, dom_y, net))
 
     return device_nodes, domain_nodes, edges
 
