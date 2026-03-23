@@ -66,6 +66,9 @@ class Application(Adw.Application):
     def on_lab_start(self, dialog: Gtk.FileDialog, response_id: Gio.AsyncResult):
         lab = dialog.select_folder_finish(response_id).get_path()
         Broker.notify(LabStartBegin())
+        
+        self.terminal_manager.set_cwd(lab)
+        
         self.dialog.set_initial_folder(Gio.File.new_for_path(lab))
 
         term = self.terminal_manager.empty()

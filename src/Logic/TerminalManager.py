@@ -11,20 +11,41 @@ print("Connecting to", '{container.name}' + '...')
 Kathara.get_instance().connect_tty(machine_name='{container.name}', lab_hash='{container.lab_hash}')
 """
     __empty = Terminal()
-    __shell = None
 
     def __init__(self):
         self.container_terminals: dict[Container, Terminal] = {}
+        self.cwd: str | None = None
+
+    def set_cwd(self, cwd: str):
+        self.cwd = cwd
 
     def empty(self):
         self.__empty.reset(True, True)
         return self.__empty
 
     def shell(self):
-        if self.__shell is None:
-            self.__shell = Terminal()
-            self.__shell.run(["bash", "-c", """kathara() { python -m kathara "$@"; } ; export -f kathara ; bash"""])
-        return self.__shell
+        import os
+        import sys
+        
+        # Create a virtual bin directory for the 'kathara' command wrapper
+        bin_dir = "/tmp/katharsis_bin"
+        os.makedirs(bin_dir, exist_ok=True)
+        kathara_path = os.path.join(bin_dir, "kathara")
+        try:
+            with open(kathara_path, "w") as f:
+                f.write(f"#!/bin/sh\nexec \"{sys.executable}\" -m kathara \"$@\"\n")
+            os.chmod(kathara_path, 0o755)
+        except OSError:
+            pass  # Ignore if we don't have permissions
+            
+        current_path = os.environ.get("PATH", "")
+        if bin_dir not in current_path.split(os.pathsep):
+            os.environ["PATH"] = f"{bin_dir}{os.pathsep}{current_path}"
+
+        shell_term = Terminal()
+        shell_cmd = os.environ.get("SHELL", "/bin/bash")
+        shell_term.run([shell_cmd], cwd=self.cwd)
+        return shell_term
 
     def get_terminal(self, container: Container):
         if container in self.container_terminals:
