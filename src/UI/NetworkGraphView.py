@@ -680,10 +680,29 @@ def _force_directed_layout(containers, width, height, iterations=150, yield_fram
         domain_nodes[d_name] = (pos_x[d_idx], pos_y[d_idx])
 
     edges = []
+    # Identify degree-2 domains and their connected device pairs
+    degree2_device_pairs = {}  # domain_name -> (container_a, container_b)
+    for d_name, d_idx in domain_index.items():
+        if domain_counts[d_name] == 2:
+            connected = [ci for (ci, dj) in edge_pairs if dj == d_idx]
+            if len(connected) == 2:
+                ca, cb = sorted_containers[connected[0]], sorted_containers[connected[1]]
+                degree2_device_pairs[d_name] = (ca, cb)
+    
+    dev_pos = {c: (x, y) for c, x, y in device_nodes}
+    for d_name, (ca, cb) in degree2_device_pairs.items():
+        ax, ay = dev_pos[ca]
+        bx, by = dev_pos[cb]
+        # Single device-to-device edge
+        edges.append((ax, ay, bx, by, d_name))
+        # Place domain at midpoint
+        domain_nodes[d_name] = ((ax + bx) / 2, (ay + by) / 2)
+    
+    # Non-degree-2 domains: normal device→domain edges
     for c, dx, dy in device_nodes:
         nets = c.networks if c.networks else ["Not connected"]
         for net in nets:
-            if net in domain_nodes:
+            if net in domain_nodes and net not in degree2_device_pairs:
                 dom_x, dom_y = domain_nodes[net]
                 edges.append((dx, dy, dom_x, dom_y, net))
 
@@ -713,7 +732,7 @@ COL_DOMAIN_TEXT = (0.85, 1.0, 0.88)
 COL_TEXT = (1.0, 1.0, 1.0)
 
 
-from gi.repository import Gtk, Gdk, GLib
+from gi.repository import Gtk, Gdk, GLib, Adw
 
 class NetworkGraphView(Gtk.ScrolledWindow):
     """A scrollable network topology graph view drawn with Cairo (GNS3-style), with Replay Mode."""
@@ -721,6 +740,43 @@ class NetworkGraphView(Gtk.ScrolledWindow):
     ZOOM_MIN = 0.3
     ZOOM_MAX = 3.0
     ZOOM_STEP = 0.1
+    BG_DARK = (0.11, 0.11, 0.13)
+    BG_LIGHT = (0.96, 0.96, 0.97)
+    THEME_COLORS = {
+        True: {
+            "edge": COL_EDGE,
+            "device": COL_DEVICE,
+            "device_hover": COL_DEVICE_HOVER,
+            "device_border": COL_DEVICE_BORDER,
+            "enddevice": COL_ENDDEVICE,
+            "enddevice_hover": COL_ENDDEVICE_HOVER,
+            "enddevice_border": COL_ENDDEVICE_BORDER,
+            "glow": COL_GLOW,
+            "glow_end": COL_GLOW_END,
+            "domain_fill": COL_DOMAIN_FILL,
+            "domain_border": COL_DOMAIN_BORDER,
+            "domain_text": COL_DOMAIN_TEXT,
+            "text": COL_TEXT,
+            "icon": (1.0, 1.0, 1.0, 0.85),
+        },
+        False: {
+            # Light mode palette tuned for stronger contrast on a bright canvas.
+            "edge": (0.26, 0.42, 0.62, 0.42),
+            "device": (0.15, 0.36, 0.72, 0.95),
+            "device_hover": (0.10, 0.30, 0.64, 0.98),
+            "device_border": (0.06, 0.20, 0.44, 1.0),
+            "enddevice": (0.83, 0.46, 0.12, 0.95),
+            "enddevice_hover": (0.74, 0.38, 0.08, 0.98),
+            "enddevice_border": (0.55, 0.24, 0.04, 1.0),
+            "glow": (0.14, 0.36, 0.70, 0.16),
+            "glow_end": (0.72, 0.40, 0.10, 0.18),
+            "domain_fill": (0.20, 0.58, 0.33, 0.92),
+            "domain_border": (0.08, 0.38, 0.20, 1.0),
+            "domain_text": (0.08, 0.28, 0.14),
+            "text": (0.08, 0.08, 0.10),
+            "icon": (1.0, 1.0, 1.0, 0.92),
+        },
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, vexpand=True, hexpand=True)
@@ -741,6 +797,14 @@ class NetworkGraphView(Gtk.ScrolledWindow):
         self.zoom_level = 1.0
         self._base_w = MIN_CANVAS
         self._base_h = MIN_CANVAS
+
+        # Drag state
+        self._drag_node = None     # ('device', container) or ('domain', name)
+        self._drag_offset_x = 0.0  # offset of cursor from node center at drag start
+        self._drag_offset_y = 0.0
+        self._is_dragging = False  # True once the mouse has moved significantly
+        self._suppress_click = False  # Suppress the next click after a drag
+        self._style_manager = Adw.StyleManager.get_default()
 
         self.drawing_area = Gtk.DrawingArea()
         self.drawing_area.set_draw_func(self._draw)
@@ -769,6 +833,13 @@ class NetworkGraphView(Gtk.ScrolledWindow):
         zoom_gesture = Gtk.GestureZoom()
         self.drawing_area.add_controller(zoom_gesture)
 
+        # Drag nodes
+        drag = Gtk.GestureDrag()
+        drag.connect("drag-begin", self._on_drag_begin)
+        drag.connect("drag-update", self._on_drag_update)
+        drag.connect("drag-end", self._on_drag_end)
+        self.drawing_area.add_controller(drag)
+
         # Overlay to hold the replay toolbar at the bottom
         self.overlay = Gtk.Overlay()
         self.overlay.set_child(self.drawing_area)
@@ -777,8 +848,12 @@ class NetworkGraphView(Gtk.ScrolledWindow):
         self.overlay.add_overlay(self.replay_toolbar)
 
         self.set_child(self.overlay)
+        self._style_manager.connect("notify::dark", self._on_theme_changed)
 
         Broker.subscribe(ContainersUpdate, self._on_containers_update)
+
+    def _on_theme_changed(self, *_):
+        self.drawing_area.queue_draw()
 
     def _build_replay_ui(self):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -879,8 +954,22 @@ class NetworkGraphView(Gtk.ScrolledWindow):
             return GLib.SOURCE_REMOVE
 
     def _on_containers_update(self, event: ContainersUpdate):
-        self.containers = list(event.containers)
-        self._recalculate()
+        new_containers = list(event.containers)
+        # Check if the container set actually changed (by name set)
+        old_names = {c.name for c in self.containers}
+        new_names = {c.name for c in new_containers}
+        self.containers = new_containers
+        if old_names != new_names:
+            self._recalculate()
+        else:
+            # Same containers - just update the Container refs without recalculating
+            name_to_new = {c.name: c for c in new_containers}
+            self.device_nodes = [
+                (name_to_new[c.name], x, y) if c.name in name_to_new else (c, x, y)
+                for c, x, y in self.device_nodes
+            ]
+            self._rebuild_edges()
+            self.drawing_area.queue_draw()
 
     def _recalculate(self):
         # Compute canvas size based on node count
@@ -936,18 +1025,31 @@ class NetworkGraphView(Gtk.ScrolledWindow):
         self.drawing_area.set_content_width(int(self._base_w * self.zoom_level))
         self.drawing_area.set_content_height(int(self._base_h * self.zoom_level))
 
+    def reset_layout(self):
+        """Clear user-adjusted positions and recalculate the layout from scratch."""
+        self.device_nodes.clear()
+        self.domain_nodes.clear()
+        self.edges.clear()
+        self._recalculate()
+
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
 
     def _draw(self, area, cr, width, height):
         # Background
-        cr.set_source_rgb(*COL_BG)
+        is_dark = self._style_manager.get_dark()
+        theme = self.THEME_COLORS[is_dark]
+        bg = self.BG_DARK if is_dark else self.BG_LIGHT
+        cr.set_source_rgb(*bg)
         cr.rectangle(0, 0, width, height)
         cr.fill()
 
         if not self.device_nodes and not self.domain_nodes:
-            cr.set_source_rgba(1, 1, 1, 0.4)
+            if is_dark:
+                cr.set_source_rgba(1, 1, 1, 0.4)
+            else:
+                cr.set_source_rgba(0.1, 0.1, 0.1, 0.55)
             cr.select_font_face("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
             cr.set_font_size(16)
             text = "No active devices"
@@ -960,7 +1062,7 @@ class NetworkGraphView(Gtk.ScrolledWindow):
 
         # 1. Edges
         for dx, dy, dom_x, dom_y, _ in self.edges:
-            cr.set_source_rgba(*COL_EDGE)
+            cr.set_source_rgba(*theme["edge"])
             cr.set_line_width(1.8)
             cr.move_to(dx, dy)
             cr.line_to(dom_x, dom_y)
@@ -972,14 +1074,14 @@ class NetworkGraphView(Gtk.ScrolledWindow):
         for domain_name, (x, y) in self.domain_nodes.items():
             r = DOMAIN_RADIUS
             _rounded_rect(cr, x - r, y - r, r * 2, r * 2, 5)
-            cr.set_source_rgba(*COL_DOMAIN_FILL)
+            cr.set_source_rgba(*theme["domain_fill"])
             cr.fill_preserve()
-            cr.set_source_rgba(*COL_DOMAIN_BORDER)
+            cr.set_source_rgba(*theme["domain_border"])
             cr.set_line_width(1.5)
             cr.stroke()
 
             # Label
-            cr.set_source_rgb(*COL_DOMAIN_TEXT)
+            cr.set_source_rgb(*theme["domain_text"])
             ext = cr.text_extents(domain_name)
             cr.move_to(x - ext.width / 2, y + r + 14)
             cr.show_text(domain_name)
@@ -993,26 +1095,26 @@ class NetworkGraphView(Gtk.ScrolledWindow):
 
             # Glow
             if is_hover:
-                cr.set_source_rgba(*(COL_GLOW_END if is_end_device else COL_GLOW))
+                cr.set_source_rgba(*(theme["glow_end"] if is_end_device else theme["glow"]))
                 cr.arc(x, y, DEVICE_RADIUS + 10, 0, 2 * math.pi)
                 cr.fill()
 
             # Fill
             if is_end_device:
-                cr.set_source_rgba(*(COL_ENDDEVICE_HOVER if is_hover else COL_ENDDEVICE))
+                cr.set_source_rgba(*(theme["enddevice_hover"] if is_hover else theme["enddevice"]))
             else:
-                cr.set_source_rgba(*(COL_DEVICE_HOVER if is_hover else COL_DEVICE))
+                cr.set_source_rgba(*(theme["device_hover"] if is_hover else theme["device"]))
             cr.arc(x, y, DEVICE_RADIUS, 0, 2 * math.pi)
             cr.fill()
 
             # Border
-            cr.set_source_rgba(*(COL_ENDDEVICE_BORDER if is_end_device else COL_DEVICE_BORDER))
+            cr.set_source_rgba(*(theme["enddevice_border"] if is_end_device else theme["device_border"]))
             cr.set_line_width(2.0 if is_hover else 1.5)
             cr.arc(x, y, DEVICE_RADIUS, 0, 2 * math.pi)
             cr.stroke()
 
             # Server icon inside
-            cr.set_source_rgba(1, 1, 1, 0.85)
+            cr.set_source_rgba(*theme["icon"])
             cr.set_line_width(1.2)
             for dy_off in [-5, 0, 5]:
                 cr.move_to(x - 8, y + dy_off)
@@ -1023,7 +1125,7 @@ class NetworkGraphView(Gtk.ScrolledWindow):
                 cr.fill()
 
             # Label
-            cr.set_source_rgb(*COL_TEXT)
+            cr.set_source_rgb(*theme["text"])
             cr.select_font_face("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
             cr.set_font_size(15)
             ext = cr.text_extents(container.name)
@@ -1038,6 +1140,7 @@ class NetworkGraphView(Gtk.ScrolledWindow):
         return x / self.zoom_level, y / self.zoom_level
 
     def _hit_test(self, x, y):
+        """Return the Container under screen coords (x, y), or None."""
         gx, gy = self._to_graph_coords(x, y)
         for container, nx, ny in self.device_nodes:
             if math.hypot(gx - nx, gy - ny) <= HIT_RADIUS:
@@ -1045,18 +1148,30 @@ class NetworkGraphView(Gtk.ScrolledWindow):
         return None
 
     def _on_click(self, gesture, n_press, x, y):
-        container = self._hit_test(x, y)
+        if self._suppress_click:
+            self._suppress_click = False
+            return  # Suppress click after a drag
+        container = self._hit_test_device(x, y)
         if container is not None:
             Broker.notify(ContainerConnect(container))
 
     def _on_motion(self, controller, x, y):
-        container = self._hit_test(x, y)
+        # Track mouse position for scroll-zoom centering
+        self._last_mouse_x = x
+        self._last_mouse_y = y
+        if self._is_dragging:
+            return  # let drag handler own the cursor
+        container = self._hit_test_device(x, y)
         if container != self.hover_container:
             self.hover_container = container
             if container is not None:
                 self.drawing_area.set_cursor(Gdk.Cursor.new_from_name("pointer"))
             else:
-                self.drawing_area.set_cursor(None)
+                # Check if we are over a domain (show move cursor)
+                if self._hit_test_domain(x, y) is not None:
+                    self.drawing_area.set_cursor(Gdk.Cursor.new_from_name("move"))
+                else:
+                    self.drawing_area.set_cursor(None)
             self.drawing_area.queue_draw()
 
     def _on_leave(self, controller):
@@ -1065,17 +1180,163 @@ class NetworkGraphView(Gtk.ScrolledWindow):
             self.drawing_area.set_cursor(None)
             self.drawing_area.queue_draw()
 
+    # ------------------------------------------------------------------
+    # Drag handling
+    # ------------------------------------------------------------------
+
+    def _hit_test_device(self, x, y):
+        """Return the Container under screen coords (x, y), or None."""
+        gx, gy = self._to_graph_coords(x, y)
+        for container, nx, ny in self.device_nodes:
+            if math.hypot(gx - nx, gy - ny) <= HIT_RADIUS:
+                return container
+        return None
+
+    def _hit_test_domain(self, x, y):
+        """Return the domain name under screen coords (x, y), or None."""
+        gx, gy = self._to_graph_coords(x, y)
+        for name, (nx, ny) in self.domain_nodes.items():
+            if math.hypot(gx - nx, gy - ny) <= DOMAIN_RADIUS + 8:
+                return name
+        return None
+
+    def _rebuild_edges(self):
+        """Rebuild self.edges from current device_nodes and domain_nodes positions.
+        
+        For degree-2 domains (connecting exactly 2 devices), creates a single
+        device-to-device edge and repositions the domain to the midpoint.
+        """
+        dev_pos = {c: (x, y) for c, x, y in self.device_nodes}
+        
+        # Identify degree-2 domains
+        domain_device_map = {}  # domain_name -> list of containers connected to it
+        for container, _, _ in self.device_nodes:
+            nets = container.networks if container.networks else []
+            for net in nets:
+                if net in self.domain_nodes:
+                    domain_device_map.setdefault(net, []).append(container)
+        
+        degree2_domains = {}  # domain_name -> (container_a, container_b)
+        for d_name, devs in domain_device_map.items():
+            if len(devs) == 2:
+                degree2_domains[d_name] = (devs[0], devs[1])
+        
+        new_edges = []
+        # Degree-2 domains: single device-to-device edge, domain at midpoint
+        for d_name, (ca, cb) in degree2_domains.items():
+            ax, ay = dev_pos[ca]
+            bx, by = dev_pos[cb]
+            new_edges.append((ax, ay, bx, by, d_name))
+            self.domain_nodes[d_name] = ((ax + bx) / 2, (ay + by) / 2)
+        
+        # Non-degree-2 domains: normal device→domain edges
+        for container, dx, dy in self.device_nodes:
+            nets = container.networks if container.networks else []
+            for net in nets:
+                if net in self.domain_nodes and net not in degree2_domains:
+                    dom_x, dom_y = self.domain_nodes[net]
+                    new_edges.append((dx, dy, dom_x, dom_y, net))
+        
+        self.edges = new_edges
+
+    def _on_drag_begin(self, gesture, start_x, start_y):
+        self._is_dragging = False
+        # Determine what we're dragging
+        container = self._hit_test_device(start_x, start_y)
+        if container is not None:
+            gx, gy = self._to_graph_coords(start_x, start_y)
+            # Find device position
+            for c, cx, cy in self.device_nodes:
+                if c == container:
+                    self._drag_node = ('device', container)
+                    self._drag_offset_x = cx - gx
+                    self._drag_offset_y = cy - gy
+                    break
+            return
+        domain = self._hit_test_domain(start_x, start_y)
+        if domain is not None:
+            gx, gy = self._to_graph_coords(start_x, start_y)
+            nx, ny = self.domain_nodes[domain]
+            self._drag_node = ('domain', domain)
+            self._drag_offset_x = nx - gx
+            self._drag_offset_y = ny - gy
+            return
+        self._drag_node = None
+
+    def _on_drag_update(self, gesture, offset_x, offset_y):
+        if self._drag_node is None:
+            return
+        # Mark as "actually moved"
+        if not self._is_dragging and (abs(offset_x) > 4 or abs(offset_y) > 4):
+            self._is_dragging = True
+            self.drawing_area.set_cursor(Gdk.Cursor.new_from_name("grabbing"))
+        if not self._is_dragging:
+            return
+
+        # Current drag position in graph coordinates
+        start_x, start_y = gesture.get_start_point()[1], gesture.get_start_point()[2]
+        cur_x = start_x + offset_x
+        cur_y = start_y + offset_y
+        gx, gy = self._to_graph_coords(cur_x, cur_y)
+        new_x = gx + self._drag_offset_x
+        new_y = gy + self._drag_offset_y
+
+        node_type, node_id = self._drag_node
+        if node_type == 'device':
+            self.device_nodes = [
+                (c, new_x, new_y) if c == node_id else (c, cx, cy)
+                for c, cx, cy in self.device_nodes
+            ]
+        elif node_type == 'domain':
+            self.domain_nodes[node_id] = (new_x, new_y)
+
+        self._rebuild_edges()
+        self.drawing_area.queue_draw()
+
+    def _on_drag_end(self, gesture, offset_x, offset_y):
+        if self._is_dragging:
+            self._suppress_click = True  # Will suppress the next click event
+            self._is_dragging = False
+            self.drawing_area.set_cursor(None)
+        self._drag_node = None
+
     def _on_scroll(self, controller, dx, dy):
         # Only zoom when Ctrl is held; otherwise let ScrolledWindow pan
         state = controller.get_current_event_state()
         if not (state & Gdk.ModifierType.CONTROL_MASK):
             return False  # let the parent ScrolledWindow handle panning
+
         new_zoom = self.zoom_level - dy * self.ZOOM_STEP
         new_zoom = max(self.ZOOM_MIN, min(self.ZOOM_MAX, new_zoom))
-        if new_zoom != self.zoom_level:
-            self.zoom_level = new_zoom
-            self._update_canvas_size()
-            self.drawing_area.queue_draw()
+        if new_zoom == self.zoom_level:
+            return True
+
+        # Get mouse position relative to the drawing area (widget coords)
+        # Use the last known motion position tracked via _on_motion
+        mouse_x = getattr(self, '_last_mouse_x', 0.0)
+        mouse_y = getattr(self, '_last_mouse_y', 0.0)
+
+        # Current scroll offsets
+        hadj = self.get_hadjustment()
+        vadj = self.get_vadjustment()
+        scroll_x = hadj.get_value()
+        scroll_y = vadj.get_value()
+
+        # Graph-space point under cursor before zoom
+        graph_x = (scroll_x + mouse_x) / self.zoom_level
+        graph_y = (scroll_y + mouse_y) / self.zoom_level
+
+        # Apply new zoom
+        self.zoom_level = new_zoom
+        self._update_canvas_size()
+
+        # After zoom, adjust scroll so the same graph-space point stays under cursor
+        new_scroll_x = graph_x * self.zoom_level - mouse_x
+        new_scroll_y = graph_y * self.zoom_level - mouse_y
+        hadj.set_value(max(0, new_scroll_x))
+        vadj.set_value(max(0, new_scroll_y))
+
+        self.drawing_area.queue_draw()
         return True
 
     def _on_zoom_gesture(self, gesture, scale):

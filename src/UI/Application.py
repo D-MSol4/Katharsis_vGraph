@@ -92,24 +92,32 @@ class Application(Adw.Application):
         for c in containers:
             if c.status != 'running':
                 continue
-            # Extract collision domain names from the container's connected networks
+            # Extract collision domain names and interface details from the container's connected networks
             network_names = []
+            interfaces = {}  # {clean_name: {"ip": ..., "mac": ..., "prefix_len": ...}}
             try:
                 networks_dict = c.attrs.get("NetworkSettings", {}).get("Networks", {})
-                for net_key in networks_dict:
+                for net_key, net_info in networks_dict.items():
                     # Skip Docker default bridge network
                     if net_key == "bridge" or net_key == "none":
                         continue
                     # Try to get the clean name from the Docker network labels
+                    clean_name = net_key
                     try:
                         docker_net = self._get_docker_client().networks.get(net_key)
                         clean_name = docker_net.attrs.get("Labels", {}).get("name", net_key)
-                        network_names.append(clean_name)
                     except Exception:
-                        network_names.append(net_key)
+                        pass
+                    network_names.append(clean_name)
+                    # Extract interface details
+                    interfaces[clean_name] = {
+                        "ip": net_info.get("IPAddress", ""),
+                        "mac": net_info.get("MacAddress", ""),
+                        "prefix_len": str(net_info.get("IPPrefixLen", "")),
+                    }
             except Exception:
                 pass
-            result.append(Container(c.labels['name'], c.labels['lab_hash'], network_names))
+            result.append(Container(c.labels['name'], c.labels['lab_hash'], network_names, interfaces))
         Broker.notify(ContainersUpdate(result))
 
     def on_container_detach(self, event: ContainerDetach):

@@ -300,6 +300,8 @@ class MainWindow(ApplicationWindow):
                 terminal.unparent()
             # Ensure terminal view is visible
             self.content_stack.set_visible_child_name("terminal")
+            self.graph_toggle.set_active(False)
+            self._sync_graph_controls()
             pane = self._active_pane()
             page = pane.add_terminal(terminal, event.container.name)
             self._page_pane[page] = pane
@@ -343,6 +345,14 @@ class MainWindow(ApplicationWindow):
                         tooltip_text="Open a bash terminal with access to kathara")
         bt.connect("clicked", lambda _: Broker.notify(OpenTerminal()))
         tb.pack_start(bt)
+
+        # Theme toggle
+        self.theme_btn = Gtk.Button(
+            icon_name="weather-clear-symbolic",
+            tooltip_text="Switch to light mode")
+        self.theme_btn.connect("clicked", self._on_theme_toggle)
+        tb.pack_end(self.theme_btn)
+
         sb.add_top_bar(tb)
         sb.add_bottom_bar(self.get_main_buttons())
 
@@ -354,6 +364,17 @@ class MainWindow(ApplicationWindow):
         scroll.set_child(sidebar_content)
         sb.set_content(scroll)
         return sb
+
+    def _on_theme_toggle(self, btn):
+        sm = Adw.StyleManager.get_default()
+        if sm.get_dark():
+            sm.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+            btn.set_icon_name("weather-clear-night-symbolic")
+            btn.set_tooltip_text("Switch to dark mode")
+        else:
+            sm.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+            btn.set_icon_name("weather-clear-symbolic")
+            btn.set_tooltip_text("Switch to light mode")
 
     def get_main_buttons(self):
         mb = Gtk.Box(margin_end=10, margin_start=10, margin_top=10,
@@ -417,14 +438,27 @@ class MainWindow(ApplicationWindow):
         self.graph_toggle.connect("toggled", self._on_graph_toggled)
         hb.pack_end(self.graph_toggle)
 
+        # Reset graph layout
+        self.reset_graph_btn = Gtk.Button(
+            icon_name="view-refresh-symbolic",
+            tooltip_text="Reset graph layout to auto-calculated positions",
+            visible=False)
+        self.reset_graph_btn.connect("clicked", lambda _: self.graph_view.reset_layout())
+        hb.pack_end(self.reset_graph_btn)
+
         return hb
+
+    def _sync_graph_controls(self):
+        self.reset_graph_btn.set_visible(self.content_stack.get_visible_child_name() == "graph")
 
     def _on_graph_toggled(self, button):
         if button.get_active():
             self.content_stack.set_visible_child_name("graph")
-            self.graph_view._recalculate()
+            if not self.graph_view.device_nodes:
+                self.graph_view._recalculate()
         else:
             self.content_stack.set_visible_child_name("terminal")
+        self._sync_graph_controls()
 
     def get_panel(self):
         ct = Adw.ToolbarView()

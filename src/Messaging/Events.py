@@ -111,3 +111,10 @@ class OpenTerminal(Event): pass
 class ContainerFocused(ContainerEvent):
     def __init__(self, container: Data.Container.Container):
         self.container = container
+
+
+class ContainerSelected(ContainerEvent):
+    """Emitted when the user clicks the info button on a container row."""
+    def __init__(self, container: Data.Container.Container):
+        self.container = container
+

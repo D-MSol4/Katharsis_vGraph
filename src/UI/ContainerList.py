@@ -7,14 +7,26 @@ from Messaging.Events import ContainersUpdate, \
 from UI.ContainerRow import ContainerRow
 
 
-class ContainerList(Gtk.ScrolledWindow):
+class ContainerList(Gtk.Box):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs,
-                         margin_bottom=10,
-                         margin_start=10,
-                         margin_end=10,
-                         vexpand=True
-                         )
+                         orientation=Gtk.Orientation.VERTICAL,
+                         vexpand=True)
+
+        # Search entry at top
+        self.search_entry = Gtk.SearchEntry(
+            placeholder_text="Search devices…",
+            margin_start=10, margin_end=10, margin_top=6, margin_bottom=2,
+        )
+        self.search_entry.connect("search-changed", self._on_search_changed)
+        self.append(self.search_entry)
+
+        # Scrolled container for the list
+        self.scroll = Gtk.ScrolledWindow(vexpand=True,
+                                          margin_bottom=10,
+                                          margin_start=10,
+                                          margin_end=10)
+
         self.status_page = Adw.StatusPage(
             icon_name="dialog-information-symbolic",
             title="No running devices",
@@ -22,7 +34,8 @@ class ContainerList(Gtk.ScrolledWindow):
         )
         # Main vertical box that holds all collision domain groups
         self.groups_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        self.set_child(self.status_page)
+        self.scroll.set_child(self.status_page)
+        self.append(self.scroll)
 
         # Maps: collision_domain_name -> Adw.PreferencesGroup
         self.domain_groups: dict[str, Adw.PreferencesGroup] = {}
@@ -113,10 +126,10 @@ class ContainerList(Gtk.ScrolledWindow):
         self.container_rows.clear()
         
         if not self.containers:
-            self.set_child(self.status_page)
+            self.scroll.set_child(self.status_page)
             return
 
-        self.set_child(self.groups_box)
+        self.scroll.set_child(self.groups_box)
 
         # Pre-calculate domain counts
         import collections
@@ -128,6 +141,9 @@ class ContainerList(Gtk.ScrolledWindow):
         for container in sorted(self.containers, key=lambda c: c.name):
             self.add_container(container)
 
+        # Re-apply any active search filter
+        self._apply_filter(self.search_entry.get_text())
+
     def remove_container(self, container: Container):
         entries = self.container_rows.pop(container, [])
         for domain_name, row in entries:
@@ -135,3 +151,25 @@ class ContainerList(Gtk.ScrolledWindow):
                 self.domain_groups[domain_name].remove(row)
                 self.domain_row_counts[domain_name] -= 1
                 self._remove_group_if_empty(domain_name)
+
+    # ── Search / Filter ────────────────────────────────────────────────
+
+    def _on_search_changed(self, entry):
+        self._apply_filter(entry.get_text())
+
+    def _apply_filter(self, query: str):
+        q = query.strip().lower()
+        # Track which groups have visible rows
+        group_visible = {name: False for name in self.domain_groups}
+
+        for container, entries in self.container_rows.items():
+            matches = not q or q in container.name.lower()
+            for domain_name, row in entries:
+                row.set_visible(matches)
+                if matches:
+                    group_visible[domain_name] = True
+
+        # Hide/show entire groups
+        for name, group in self.domain_groups.items():
+            group.set_visible(group_visible.get(name, False) or not q)
+

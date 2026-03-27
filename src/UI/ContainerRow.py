@@ -15,6 +15,8 @@ class ContainerRow(Adw.ActionRow):
         self.container = container
         self.add_prefix(Gtk.Image(icon_name="network-server-symbolic", pixel_size=15))
         self.connect("activated", self.on_activate)
+
+        # Detach/attach button
         self.btn = Gtk.Button(
             icon_name="window-new-symbolic",
             has_frame=False,
@@ -51,3 +53,4 @@ class ContainerRow(Adw.ActionRow):
 
     def on_attach(self):
         self.set_button_detach()
+
