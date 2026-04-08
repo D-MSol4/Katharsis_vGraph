@@ -1,6 +1,7 @@
 from Kathara.manager.Kathara import Kathara
 import docker as docker_lib
-from gi.repository import Adw, Gtk, Gio
+from gi.repository import Adw, Gtk, Gio, GLib
+import os
 
 from Data.Container import Container
 from Logic.TerminalManager import TerminalManager
@@ -63,8 +64,88 @@ class Application(Adw.Application):
     def select_lab(self, _):
         self.dialog.select_folder(callback=self.on_lab_start)
 
+    def resolve_flatpak_path(self, sandboxed_path: str) -> str:
+        if not sandboxed_path:
+            return sandboxed_path
+
+        # Parse the doc_id and optional extra sub-path from document portal paths:
+        #   /run/flatpak/doc/<doc_id>/<exported_name>[/extra/...]
+        #   /run/user/<uid>/doc/<doc_id>/<exported_name>[/extra/...]
+        import re
+        m = re.match(r'^/run/(?:flatpak|user/\d+)/doc/([^/]+)(?:/([^/]+))?(.*)$', sandboxed_path)
+        if not m:
+            return sandboxed_path
+        doc_id = m.group(1)
+        # exported_name = m.group(2)  # e.g. "lab_p4" — already included in GetHostPaths result
+        extra_path = m.group(3).lstrip('/') if m.group(3) else None  # e.g. "shared/foo" or None
+
+        # 1. D-Bus: GetHostPaths (available inside the sandbox, portal v5+)
+        try:
+            proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                'org.freedesktop.portal.Documents',
+                '/org/freedesktop/portal/documents',
+                'org.freedesktop.portal.Documents',
+                None
+            )
+            result = proxy.call_sync(
+                'GetHostPaths',
+                GLib.Variant('(as)', ([doc_id],)),
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None
+            )
+            paths_dict = result.get_child_value(0)
+            if paths_dict.n_children() > 0:
+                entry = paths_dict.get_child_value(0)
+                # value is ay (byte array) — the host path
+                path_variant = entry.get_child_value(1)
+                host_bytes = bytes(path_variant)
+                # Strip trailing null byte if present
+                if host_bytes and host_bytes[-1:] == b'\x00':
+                    host_bytes = host_bytes[:-1]
+                host_path = host_bytes.decode('utf-8')
+                if extra_path:
+                    host_path = os.path.join(host_path, extra_path)
+                return host_path
+        except Exception:
+            pass
+
+        # 2. Try os.getxattr directly (bypasses GIO wrapper issues)
+        try:
+            host_bytes = os.getxattr(sandboxed_path, 'user.document-portal.host-path')
+            if host_bytes:
+                if host_bytes[-1:] == b'\x00':
+                    host_bytes = host_bytes[:-1]
+                return host_bytes.decode('utf-8')
+        except Exception:
+            pass
+
+        # 3. Parse /proc/self/mountinfo to find the real mount source
+        try:
+            with open('/proc/self/mountinfo', 'r') as f:
+                for line in f:
+                    fields = line.split()
+                    # fields[4] is the mount point
+                    mount_point = fields[4]
+                    if sandboxed_path.startswith(mount_point) or mount_point.startswith('/run/flatpak/doc'):
+                        # Look for the mount source after the " - " separator
+                        sep_idx = fields.index('-')
+                        if sep_idx + 2 < len(fields):
+                            source = fields[sep_idx + 2]
+                            if source.startswith('/') and not source.startswith('/run/flatpak'):
+                                return source if not extra_path else os.path.join(source, extra_path)
+        except Exception:
+            pass
+
+        return sandboxed_path
+
     def on_lab_start(self, dialog: Gtk.FileDialog, response_id: Gio.AsyncResult):
-        lab = dialog.select_folder_finish(response_id).get_path()
+        file = dialog.select_folder_finish(response_id)
+        lab = self.resolve_flatpak_path(file.get_path())
+        
         Broker.notify(LabStartBegin())
         
         self.terminal_manager.set_cwd(lab)
