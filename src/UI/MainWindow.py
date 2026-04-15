@@ -48,6 +48,8 @@ class MainWindow(ApplicationWindow):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, title="Katharsis")
+        self.set_default_size(1200, 800)
+        self.maximize()
 
         # CSS for active pane highlight
         css = Gtk.CssProvider()

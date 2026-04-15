@@ -62,7 +62,7 @@ class Application(Adw.Application):
         Broker.notify(SetTerminal(term, label="Shell"))
 
     def select_lab(self, _):
-        self.dialog.select_folder(callback=self.on_lab_start)
+        self.dialog.select_folder(self.get_active_window(), None, self.on_lab_start)
 
     def resolve_flatpak_path(self, sandboxed_path: str) -> str:
         if not sandboxed_path:
